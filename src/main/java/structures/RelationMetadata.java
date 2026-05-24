@@ -4,9 +4,11 @@ import com.opencsv.CSVWriterBuilder;
 import com.opencsv.ICSVWriter;
 import com.opencsv.exceptions.CsvValidationException;
 import io.RelationalInput;
+import io.RelationalInputFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import runner.Config;
+import runner.ConnectionRegistry;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -35,14 +37,22 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
     public String[] columnNames;
     public List<Attribute> connectedAttributes;
 
-    public RelationMetadata(int relationId, int relationOffset, Path relationPath, Config config) throws IOException, CsvValidationException {
+    public RelationMetadata(int relationId, int relationOffset, TableSource source, Config config, ConnectionRegistry registry) throws IOException, CsvValidationException {
         this.chunks = new ArrayList<>();
         this.config = config;
         this.id = relationId;
-        this.size = Files.size(relationPath);
         this.offset = relationOffset;
-        this.relationalInput = new RelationalInput(relationPath, config);
-        this.columnNames = relationalInput.headerLine;
+        this.size = sizeOf(source);
+        this.relationalInput = RelationalInputFactory.open(source, config, registry);
+        this.columnNames = relationalInput.getHeader();
+    }
+
+    private static long sizeOf(TableSource source) throws IOException {
+        if (source instanceof TableSource.File file) {
+            return Files.size(file.path());
+        }
+        // DB-backed sources: no cheap size signal — fall back to 0 (chunking order becomes insertion order).
+        return 0L;
     }
 
     /**
@@ -52,7 +62,7 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
     @Override
     public Void call() throws Exception {
         long sTime = System.currentTimeMillis();
-        int maxSize = Math.max(10, config.CHUNK_SIZE / relationalInput.headerLine.length);
+        int maxSize = Math.max(10, config.CHUNK_SIZE / relationalInput.getHeader().length);
         int chunkNum = 0;
         Path chunkPath = Path.of(config.tempFolder + File.separator + "r_" + id + "_c_" + chunkNum + ".txt");
         BufferedWriter chunkWriter = Files.newBufferedWriter(chunkPath, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE);
@@ -77,13 +87,13 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
             }
         }
         chunkWriter.close();
+        relationalInput.close();
         logger.debug("Finished relation" + this.id + " (" + (System.currentTimeMillis() - sTime) + "ms)");
         return null;
     }
 
     @Override
     public int compareTo(RelationMetadata o) {
-        // reverse comparison for descending sort
-        return this.size > o.size ? -1 : 1;
+        return Long.compare(o.size, this.size);
     }
 }

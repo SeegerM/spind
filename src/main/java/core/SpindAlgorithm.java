@@ -6,8 +6,6 @@ import com.opencsv.exceptions.CsvValidationException;
 import io.Merger;
 import io.Output;
 import io.Validator;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import runner.Config;
 import structures.*;
 
@@ -23,18 +21,20 @@ import java.util.concurrent.Executors;
 /**
  * @noinspection UnstableApiUsage
  */
-public class Spind {
-    final Config config;
-    private final Metrics metrics;
-    private final int maxNary;
-    private final Logger logger;
-    private final Output output;
-    private final Clock clock;
+public class SpindAlgorithm {
+    Config config;
+    protected Metrics metrics;
+    protected int maxNary;
+    protected Output output;
+    protected Clock clock;
     RelationMetadata[] relationMetadata;
     int layer;
-    private BloomFilter<Integer> filter;
+    protected BloomFilter<Integer> filter;
 
-    public Spind(Config config) {
+    public SpindAlgorithm() {
+    }
+
+    public SpindAlgorithm(Config config) {
         this.clock = new Clock();
         clock.start("total");
 
@@ -42,13 +42,12 @@ public class Spind {
         this.config = config;
         maxNary = config.maxNary;
         this.output = new Output(config.resultFolder);
-        this.logger = LoggerFactory.getLogger(Spind.class);
         if (config.useFilter) this.filter = BloomFilter.create(Funnels.integerFunnel(), 100_000_000, 0.05);
     }
 
     public void execute() throws IOException, InterruptedException, CsvValidationException {
 
-        logger.info("Starting execution");
+        //logger.info("Starting execution");
 
         clock.start("init");
         this.relationMetadata = initializeRelations();
@@ -60,7 +59,7 @@ public class Spind {
         Attribute[] attributes = buildUnaryAttributes();
         candidates.loadUnary(attributes);
 
-        logger.info("Finished initialization. Took: " + clock.stop("init") + "ms");
+        //logger.info("Finished initialization. Took: " + clock.stop("init") + "ms");
 
         // 3) while attributes not empty.
         while (attributes.length > 0) {
@@ -75,7 +74,7 @@ public class Spind {
 
             metrics.layerAttributes.add(numAttributes);
             metrics.layerCandidates.add(numCandidates);
-            logger.info("Starting layer: " + layer + " with " + numAttributes + " attributes forming " + numCandidates + " candidates");
+            //logger.info("Starting layer: " + layer + " with " + numAttributes + " attributes forming " + numCandidates + " candidates");
             // candidates.current.get(x).size()).sum() + " candidates");
             // 3.1) Load all attributes of the candidates.
             clock.start("sorting");
@@ -90,7 +89,7 @@ public class Spind {
             }).toList();
             executors.shutdown();
 
-            logger.info("Finished sorting. Took: " + clock.stop("sorting") + "ms");
+            //logger.info("Finished sorting. Took: " + clock.stop("sorting") + "ms");
 
             metrics.sortFiles += sortResults.stream().mapToInt(sortResult -> sortResult.mergeJob().chunkPaths().size()).sum();
 
@@ -102,13 +101,13 @@ public class Spind {
                     totalSaved += sortAttribute.getMetadata().globalUnique;
                 }
             }
-            logger.info("In total " + totalSaved + " occurrences where skipped due to global uniqueness");
+            //logger.info("In total " + totalSaved + " occurrences where skipped due to global uniqueness");
 
             List<MergeJob> mergeJobs = sortResults.stream().map(SortResult::mergeJob).toList();
 
             clock.start("merging");
             int activeRelations = iterativeMerge(attributes, mergeJobs);
-            logger.info("Finished merging. Took: " + clock.stop("merging") + "ms");
+            //logger.info("Finished merging. Took: " + clock.stop("merging") + "ms");
 
             // 3.2) Validate candidates.
             clock.start("validation");
@@ -117,14 +116,14 @@ public class Spind {
 
             // remove all dependant candidates, that do not reference any attribute
             candidates.cleanCandidates();
-            logger.info("Finished validation. Took: " + clock.stop("validation") + "ms");
+            //logger.info("Finished validation. Took: " + clock.stop("validation") + "ms");
 
             int numPINDs = calcPINDs(attributes);
             metrics.layerPINDs.add(numPINDs);
             if (layer == 1) metrics.unary = numPINDs;
             else metrics.nary += numPINDs;
 
-            logger.info("Found " + numPINDs + " pINDs at level " + layer);
+            //logger.info("Found " + numPINDs + " pINDs at level " + layer);
             output.storePINDs(relationMetadata, attributes, layer, config);
 
             // clean relation files
@@ -138,7 +137,7 @@ public class Spind {
             // 3.4) Generate new attributes for next layer.
             clock.start("generateNext");
             attributes = candidates.generateNextLayer(attributes, relationMetadata, layer);
-            logger.info("Finished generating next layer. Took: " + clock.stop("generateNext") + "ms");
+            //logger.info("Finished generating next layer. Took: " + clock.stop("generateNext") + "ms");
         }
         // clean up temp
         Arrays.stream(Objects.requireNonNull((new File(config.tempFolder)).listFiles())).forEach(File::delete);
@@ -210,22 +209,30 @@ public class Spind {
         return total;
     }
 
-    private RelationMetadata[] initializeRelations() throws IOException, CsvValidationException, InterruptedException {
-        RelationMetadata[] relationMetadata = new RelationMetadata[config.tableSources.size()];
+    private RelationMetadata[] initializeRelations()
+            throws IOException, CsvValidationException, InterruptedException {
+
+        RelationMetadata[] relationMetadata =
+                new RelationMetadata[config.tableSources.size()];
 
         int relationOffset = 0;
+
         for (int relationId = 0; relationId < config.tableSources.size(); relationId++) {
-            relationMetadata[relationId] = new RelationMetadata(relationId, relationOffset,
-                    config.tableSources.get(relationId), config, config.connectionRegistry());
+            relationMetadata[relationId] = new RelationMetadata(
+                    relationId,
+                    relationOffset,
+                    config.tableSources.get(relationId),
+                    config,
+                    config.connectionRegistry()
+            );
+
             relationOffset += relationMetadata[relationId].columnNames.length;
         }
 
         clock.start("chunking");
-        logger.info("Stating chunking");
 
         ExecutorService executors = Executors.newFixedThreadPool(config.PARALLEL);
         executors.invokeAll(Arrays.stream(relationMetadata).sorted().toList()).forEach(relation -> {
-
             try {
                 relation.get();
             } catch (ExecutionException | InterruptedException e) {
@@ -234,9 +241,8 @@ public class Spind {
         });
         executors.shutdown();
 
-        logger.info("Finished chunking. Took: " + clock.stop("chunking"));
-
-        this.metrics.chunkFiles = Arrays.stream(relationMetadata).mapToInt(metadata -> metadata.chunks.size()).sum();
+        this.metrics.chunkFiles =
+                Arrays.stream(relationMetadata).mapToInt(metadata -> metadata.chunks.size()).sum();
 
         return relationMetadata;
     }

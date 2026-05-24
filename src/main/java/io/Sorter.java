@@ -69,9 +69,9 @@ public class Sorter {
         spillCount = 0;
         spilledFiles = new ArrayList<>();
 
-        RelationalInput input;
+        CsvRelationalInput input;
         try {
-            input = new RelationalInput(sortJob, config);
+            input = new CsvRelationalInput(sortJob, config);
         } catch (IOException e) {
             e.printStackTrace();
             return null;

@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: spind-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: mixed
+      POSTGRES_USER: spind
+      POSTGRES_PASSWORD: spindpass
+    volumes:
+      - ./init/postgres.sql:/docker-entrypoint-initdb.d/01-postgres.sql:ro
+
+  mongo:
+    image: mongo:8
+    container_name: spind-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: spind
+      MONGO_INITDB_ROOT_PASSWORD: spindpass
+      MONGO_INITDB_DATABASE: shop
+    volumes:
+      - ./init/mongo.js:/docker-entrypoint-initdb.d/01-mongo.js:ro
+
+  neo4j:
+    image: neo4j:2026.03.1
+    container_name: spind-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/testpassword
+
+  neo4j-seed:
+    image: neo4j:2026.03.1
+    depends_on:
+      - neo4j
+    volumes:
+      - ./init/neo4j.cypher:/seed.cypher:ro
+    entrypoint: >
+      bash -c "
+      until cypher-shell -a bolt://neo4j:7687 -u neo4j -p testpassword 'RETURN 1';
+      do sleep 2;
+      done;
+      cypher-shell -a bolt://neo4j:7687 -u neo4j -p testpassword -f /seed.cypher
+      "
