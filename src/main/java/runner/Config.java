@@ -6,34 +6,27 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 public class Config {
 
     public final double threshold;
     public int PARALLEL = Runtime.getRuntime().availableProcessors(); // or specify your desired parallelism level
-
     public int VALIDATION_SIZE = 50_000;
     public int MERGE_SIZE = 300;
     public int CHUNK_SIZE = 6_000_000;
     public int SORT_SIZE = 10_000_000;
-
-    /*
-    public int VALIDATION_SIZE = 250_000;
-    public int MERGE_SIZE = 1_500;
-    public int CHUNK_SIZE = 6_000_000;
-    public int SORT_SIZE = 25_000_0000;
-     */
     public int maxNary = -1;
     public String databaseName;
     public String[] tableNames;
+    public List<TableSource> tableSources = new ArrayList<>();
+    private ConnectionRegistry connectionRegistry;
     public String DEFAULT_HEADER_STRING = "column";
     public String folderPath = "F:\\metaserve\\io\\data\\";
     public String tempFolder = "F:\\temp";
     public String resultFolder = "F:\\statistics";
-    public String fileEnding = ".tbl";
-    public char separator = '|';
+    public String fileEnding = ".csv";
+    public char separator = ',';
     public char quoteChar = '\"';
     public char fileEscape = '\\';
     public boolean strictQuotes = false;
@@ -50,9 +43,36 @@ public class Config {
     public boolean refineFilter = true; // whether the bloom filter should be reconstructed in every layer
     public boolean useFilter = true; // whether the bloom filter should be used
 
+    // --- Similarity-based IND discovery (psIND) ---
+    // NONE = classic exact-equality pIND (default). Anything else activates the SAWFISH-style
+    // similarity discovery path in core/Spind.execute(). Unary only.
+    public SimilarityMode similarityMode = SimilarityMode.NONE;
+    /** Edit distance threshold τ in EDIT_DISTANCE / HYBRID modes (number of edits). */
+    public int editDistanceThreshold = 1;
+    /** Normalized threshold δ ∈ (0,1] in JACCARD / HYBRID modes. */
+    public double normalizedThreshold = 0.8;
+    /** Drop columns where any value exceeds this many characters (paper §3). */
+    public int maxValueLength = 50;
+    /** Drop columns where any value exceeds this many tokens (Jaccard, paper §3). */
+    public int maxTokenCount = 10;
+    /** Tokenizer used when in JACCARD mode. */
+    public Tokenizer jaccardTokenizer = Tokenizer.WHITESPACE;
 
-    public List<TableSource> tableSources = new ArrayList<>();
-    private ConnectionRegistry connectionRegistry;
+    public enum SimilarityMode {
+        /** Classic exact-equality partial IND discovery — original SPIND behavior. */
+        NONE,
+        /** Absolute Levenshtein edit distance with threshold {@link #editDistanceThreshold}. */
+        EDIT_DISTANCE,
+        /** Jaccard similarity on tokens with threshold {@link #normalizedThreshold}. */
+        JACCARD,
+        /** Hybrid: absolute ED for short values, normalized ED for longer ones (paper §3). */
+        HYBRID
+    }
+
+    public enum Tokenizer {
+        WHITESPACE,
+        NGRAM_3
+    }
 
     public Config(double threshold) {
         this.threshold = threshold;
@@ -70,11 +90,7 @@ public class Config {
      * @param datasetPath path to the folder where the tables are stored in
      */
     void setDataset(String datasetPath) throws IOException {
-        setDataset(datasetPath, -1);
-    }
-
-    void setDataset(String datasetPath, int k) throws IOException {
-        File folder = new File(datasetPath);
+        File folder = new File(this.folderPath + File.separator + datasetPath);
         if (!folder.exists()) {
             throw new IOException("The dataset folder does not exist:" + folder.getAbsolutePath());
         }
@@ -85,26 +101,12 @@ public class Config {
         if (files == null) {
             throw new IOException("The dataset folder does not contain any files:" + folder.getAbsolutePath());
         }
-        files = Arrays.stream(files)
-                .filter(File::isFile)
-                .toArray(File[]::new);
         this.databaseName = folder.getName();
         this.tableSources = new ArrayList<>(files.length);
         for (File file : files) {
             this.tableSources.add(new TableSource.File(file.toPath()));
         }
         refreshTableNames();
-    }
-
-    private void buildFileSourcesFromTableNames() {
-        if (tableNames == null) {
-            return;
-        }
-        this.tableSources = new ArrayList<>(tableNames.length);
-        for (String tableName : tableNames) {
-            Path path = Path.of(folderPath + File.separator + databaseName + File.separator + tableName + fileEnding);
-            this.tableSources.add(new TableSource.File(path, tableName));
-        }
     }
 
     /** Use a single Postgres connection's tables as the dataset. */
@@ -147,7 +149,7 @@ public class Config {
         this.tableNames = this.tableSources.stream().map(TableSource::displayName).toArray(String[]::new);
     }
 
-    void setDataset(Config.Dataset dataset) {
+    void setDataset(Dataset dataset) {
         switch (dataset) {
             case ANIMAL_CROSSING -> {
                 this.databaseName = "ACNH";
@@ -348,6 +350,18 @@ public class Config {
             }
             default -> {
             }
+        }
+        buildFileSourcesFromTableNames();
+    }
+
+    private void buildFileSourcesFromTableNames() {
+        if (tableNames == null) {
+            return;
+        }
+        this.tableSources = new ArrayList<>(tableNames.length);
+        for (String tableName : tableNames) {
+            Path path = Path.of(folderPath + File.separator + databaseName + File.separator + tableName + fileEnding);
+            this.tableSources.add(new TableSource.File(path, tableName));
         }
     }
 

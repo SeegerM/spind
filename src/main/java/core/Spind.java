@@ -9,6 +9,7 @@ import io.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import runner.Config;
+import similarity.*;
 import structures.*;
 
 import java.io.File;
@@ -58,9 +59,20 @@ public class Spind {
 
         // 1) get all unary attributes.
         Attribute[] attributes = buildUnaryAttributes();
+
+        // Similarity-based discovery bypasses the sort/merge/validate layer loop entirely
+        // (lexicographic sort doesn't bring similar strings together). Unary only.
+        if (config.similarityMode != Config.SimilarityMode.NONE) {
+            runSimilarityDiscovery(attributes);
+            cleanupTempFiles();
+            output.storeMetadata(config, clock, metrics);
+            return;
+        }
+
         candidates.loadUnary(attributes);
 
         logger.info("Finished initialization. Took: " + clock.stop("init") + "ms");
+
 
         // 3) while attributes not empty.
         while (attributes.length > 0) {
@@ -278,5 +290,44 @@ public class Spind {
         }
 
         return jobs;
+    }
+
+    private void runSimilarityDiscovery(Attribute[] attributes) throws IOException, CsvValidationException, InterruptedException {
+        SimilarityMeasure measure = SimilarityMeasureFactory.create(config);
+        logger.info("Starting similarity discovery (mode={}, measure={}, threshold={})",
+                config.similarityMode, measure.name(), config.threshold);
+
+        clock.start("preprocessing");
+        Map<Integer, LengthBucketedColumn> columns =
+                ColumnPreprocessor.preprocess(relationMetadata, attributes, measure, config);
+        logger.info("Finished preprocessing. Took: " + clock.stop("preprocessing") + "ms");
+
+        clock.start("pruning");
+        Map<Integer, Set<Integer>> surviving = CandidatePruner.prune(columns, measure, attributes, config);
+        logger.info("Finished candidate pruning. Took: " + clock.stop("pruning") + "ms");
+
+        clock.start("validation");
+        new SimilarityValidator(measure, config).validate(columns, surviving, attributes);
+        logger.info("Finished similarity validation. Took: " + clock.stop("validation") + "ms");
+
+        int psINDs = 0;
+        for (Attribute a : attributes) {
+            if (a.getReferenced() != null) psINDs += a.getReferenced().size();
+        }
+        metrics.unary = psINDs;
+        metrics.layerAttributes.add(attributes.length);
+        metrics.layerCandidates.add(psINDs);
+        metrics.layerPINDs.add(psINDs);
+        logger.info("Found " + psINDs + " psINDs at unary layer (" + measure.name() + ")");
+        output.storePINDs(relationMetadata, attributes, 1, config);
+    }
+
+    private void cleanupTempFiles() {
+        File[] temp = new File(config.tempFolder).listFiles();
+        if (temp == null) return;
+        for (File f : temp) {
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+        }
     }
 }
