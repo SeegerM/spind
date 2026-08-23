@@ -57,6 +57,14 @@ public class Config {
 
     /** Collect per-column counts during chunking. Prerequisite for {@link #usePrePrune} and {@link #useProgressiveSampling}. */
     public boolean collectColumnStats = false;
+    /**
+     * Restrict candidates to pairs of extractors drawn from the same comparison domain.
+     *
+     * The framework compares normalized values as strings, which lets a numeric column be included
+     * in a textual one whenever the text happens to spell the numbers. Those inclusions hold and
+     * mean nothing. Requires {@link #collectColumnStats}, which is where domains are inferred.
+     */
+    public boolean typedComparison = false;
 
     /** Cap on distinct values retained per relation while collecting statistics. */
     public int statsValueBudget = 200_000;

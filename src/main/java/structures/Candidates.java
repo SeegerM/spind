@@ -383,6 +383,7 @@ public class Candidates {
     public long loadUnary(Attribute[] attributes, ColumnStats stats) {
         current = attributes;
         long pruned = 0;
+        long prunedByDomain = 0;
 
         for (Attribute dependant : attributes) {
             int dependantId = dependant.getId();
@@ -398,10 +399,23 @@ public class Candidates {
             // validator will later enforce.
             long violationCap = bounded ? (long) ((1.0 - config.threshold) * dependantSize) : Long.MAX_VALUE;
 
+            ColumnStats.Domain dependantDomain = stats.domain(dependantId);
+
             PINDList referenced = new PINDList();
             for (Attribute candidate : attributes) {
                 int referencedId = candidate.getId();
                 if (referencedId == dependantId) {
+                    continue;
+                }
+                // Two observations are comparable only if they are drawn from the same domain.
+                // Without this, a numeric column is included in every textual one that happens to
+                // spell its values, which holds and says nothing. An empty column has no domain
+                // and is left to the other rules.
+                if (config.typedComparison
+                        && dependantDomain != ColumnStats.Domain.UNKNOWN
+                        && stats.domain(referencedId) != ColumnStats.Domain.UNKNOWN
+                        && dependantDomain != stats.domain(referencedId)) {
+                    prunedByDomain++;
                     continue;
                 }
                 if (bounded) {
@@ -419,7 +433,11 @@ public class Candidates {
 
         logger.info("Pre-pruned " + pruned + " unary candidates using column statistics ("
                 + stats.countedColumns() + "/" + attributes.length + " columns had exact distinct counts).");
-        return pruned;
+        if (config.typedComparison) {
+            logger.info("Pre-pruned " + prunedByDomain + " unary candidates whose two sides are "
+                    + "drawn from different comparison domains.");
+        }
+        return pruned + prunedByDomain;
     }
 
     public void pruneGlobalUnique(Attribute[] attributes) {

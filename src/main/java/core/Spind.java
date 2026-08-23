@@ -470,7 +470,8 @@ public class Spind {
         ColumnStats stats = new ColumnStats(attributeCount);
         for (RelationMetadata relation : relationMetadata) {
             if (relation.columnTotalValues == null) continue;
-            stats.ingest(relation.offset, relation.columnTotalValues, relation.columnNullValues, relation.columnDistinctValues);
+            stats.ingest(relation.offset, relation.columnTotalValues, relation.columnNullValues,
+                    relation.columnDistinctValues, relation.columnNumeric, relation.columnHasValues);
         }
         return stats;
     }

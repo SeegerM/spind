@@ -50,6 +50,9 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
     public long[] columnTotalValues;
     public long[] columnNullValues;
     public long[] columnDistinctValues;
+    /** Per-column comparison domain, filled alongside the counters. */
+    public boolean[] columnNumeric;
+    public boolean[] columnHasValues;
 
     public RelationMetadata(int relationId, int relationOffset, TableSource source, Config config, ConnectionRegistry registry) throws IOException, CsvValidationException {
         this.chunks = new ArrayList<>();
@@ -129,6 +132,8 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
         private final long[] total;
         private final long[] nulls;
         private final Set<String>[] distinct;
+        private final boolean[] numeric;
+        private final boolean[] sawValue;
         private long retained;
         private boolean overBudget;
 
@@ -138,20 +143,15 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
             this.total = new long[columns];
             this.nulls = new long[columns];
             this.distinct = new Set[columns];
+            this.numeric = new boolean[columns];
+            this.sawValue = new boolean[columns];
+            java.util.Arrays.fill(this.numeric, true);
             for (int i = 0; i < columns; i++) {
                 this.distinct[i] = new HashSet<>();
             }
         }
 
         void observe(String[] row) {
-            // Once the budget is gone the relation can no longer contribute a distinct count, and
-            // a distinct count is the only thing the pruning bound can use. Counting the remaining
-            // rows would be pure overhead — and on a multi-GB relation that overhead is a
-            // per-cell string comparison over billions of cells, which measurably outweighs the
-            // pruning it can never enable. Bail out entirely instead.
-            if (overBudget) {
-                return;
-            }
             int columns = Math.min(row.length, total.length);
             for (int column = 0; column < columns; column++) {
                 String value = row[column];
@@ -161,16 +161,59 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
                 boolean isNull = value == null
                         || (value.equals(config.nullString) && config.nullHandling != Config.NullHandling.EQUALITY);
                 if (isNull) {
-                    nulls[column]++;
+                    if (!overBudget) {
+                        nulls[column]++;
+                    }
+                    continue;
+                }
+
+                // Domain inference outlives the distinct budget. A distinct count is useless once
+                // it is incomplete, but a domain is only sound if every value has been seen: one
+                // unparsable value makes a column textual, and missing that value would let the
+                // column be pruned against a text column it genuinely overlaps. The check scans a
+                // string that almost always fails on its first character, so it costs far less
+                // than the hashing it outlives.
+                sawValue[column] = true;
+                if (numeric[column] && !isNumeric(value)) {
+                    numeric[column] = false;
+                }
+
+                // Once the budget is gone the relation can no longer contribute a distinct count,
+                // and a distinct count is the only thing the pruning bound can use. Counting the
+                // remaining rows would be pure overhead — on a multi-GB relation that is a
+                // per-cell hash over billions of cells, which measurably outweighs the pruning it
+                // can never enable.
+                if (overBudget) {
                     continue;
                 }
                 total[column]++;
                 if (distinct[column].add(value) && ++retained > config.statsValueBudget) {
                     overBudget = true;
                     Arrays.fill(distinct, null); // release the sets immediately
-                    return; // the counts for this row are already incomplete; abandon them
                 }
             }
+        }
+
+        /** Whether a value is a number, and therefore drawn from a numeric comparison domain. */
+        private static boolean isNumeric(String value) {
+            int length = value.length();
+            if (length == 0) {
+                return false;
+            }
+            int index = (value.charAt(0) == '-' || value.charAt(0) == '+') ? 1 : 0;
+            boolean digit = false;
+            boolean decimalPoint = false;
+            for (; index < length; index++) {
+                char c = value.charAt(index);
+                if (c >= '0' && c <= '9') {
+                    digit = true;
+                } else if (c == '.' && !decimalPoint) {
+                    decimalPoint = true;
+                } else {
+                    return false;
+                }
+            }
+            return digit;
         }
 
         /**
@@ -183,6 +226,10 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
             relation.columnTotalValues = new long[total.length];
             relation.columnNullValues = new long[total.length];
             relation.columnDistinctValues = new long[total.length];
+            // Domains are published whether or not the counts were abandoned: they were collected
+            // over the whole relation either way.
+            relation.columnNumeric = numeric.clone();
+            relation.columnHasValues = sawValue.clone();
             for (int column = 0; column < total.length; column++) {
                 relation.columnTotalValues[column] = overBudget ? ColumnStats.UNKNOWN : total[column];
                 relation.columnNullValues[column] = overBudget ? ColumnStats.UNKNOWN : nulls[column];

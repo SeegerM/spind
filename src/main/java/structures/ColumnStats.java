@@ -22,11 +22,25 @@ public class ColumnStats {
     private final long[] totalValues;
     private final long[] nullValues;
     private final long[] distinctValues;
+    private final boolean[] numeric;
+    private final boolean[] hasValues;
+
+    /**
+     * The comparison domain a column's values are drawn from.
+     *
+     * Two observations can only stand in an inclusion if they are comparable, and comparing a
+     * number against a text is a category error that string comparison silently permits: IMDB's
+     * running times are all contained in its title texts, because some films are called "1917".
+     * UNKNOWN means the column held no values at all and therefore constrains nothing.
+     */
+    public enum Domain { NUMERIC, TEXT, UNKNOWN }
 
     public ColumnStats(int attributeCount) {
         this.totalValues = new long[attributeCount];
         this.nullValues = new long[attributeCount];
         this.distinctValues = new long[attributeCount];
+        this.numeric = new boolean[attributeCount];
+        this.hasValues = new boolean[attributeCount];
         Arrays.fill(this.distinctValues, UNKNOWN);
     }
 
@@ -38,10 +52,23 @@ public class ColumnStats {
      * @param nulls      null count per column
      * @param distinct   distinct non-null value count per column, or {@link #UNKNOWN}
      */
-    public void ingest(int offset, long[] total, long[] nulls, long[] distinct) {
+    public void ingest(int offset, long[] total, long[] nulls, long[] distinct,
+                       boolean[] columnNumeric, boolean[] columnHasValues) {
         System.arraycopy(total, 0, totalValues, offset, total.length);
         System.arraycopy(nulls, 0, nullValues, offset, nulls.length);
         System.arraycopy(distinct, 0, distinctValues, offset, distinct.length);
+        if (columnNumeric != null) {
+            System.arraycopy(columnNumeric, 0, numeric, offset, columnNumeric.length);
+            System.arraycopy(columnHasValues, 0, hasValues, offset, columnHasValues.length);
+        }
+    }
+
+    /** The comparison domain of a column, or UNKNOWN when it held no values. */
+    public Domain domain(int attributeId) {
+        if (!hasValues[attributeId]) {
+            return Domain.UNKNOWN;
+        }
+        return numeric[attributeId] ? Domain.NUMERIC : Domain.TEXT;
     }
 
     /** Exact number of non-null values in the column. */
