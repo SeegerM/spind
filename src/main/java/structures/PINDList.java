@@ -1,49 +1,59 @@
 package structures;
 
-import lombok.Getter;
-import lombok.Setter;
-
 import java.util.Collection;
+import java.util.NoSuchElementException;
 
 /**
- * A PINDList is a single-linked list which stores pIND. The list is associated with some dependant attribute and stores the (open) referenced attributes with the respective
- * remaining violations.
+ * The set of referenced attributes still possible for one dependent attribute, with the violations
+ * charged to each so far.
+ *
+ * <p>Stored as two parallel primitive arrays rather than a linked list of objects. On
+ * candidate-heavy inputs this is the dominant allocation in the whole algorithm — WebTables opens
+ * with roughly 348 million candidate pairs — and one node per pair costs an object header, an int,
+ * two longs and a pointer, about 44 bytes, versus 12 bytes here. Just as importantly it is one
+ * allocation per dependent attribute instead of one per candidate, which is what actually shows up
+ * in the profile.</p>
+ *
+ * <p>The violation budget moved from the element to the list. Every element of a list always
+ * carried the identical cap — it is derived from the dependent attribute alone — so storing it per
+ * element was pure duplication, another 8 bytes per candidate.</p>
+ *
+ * <p><b>Iteration contract.</b> {@link PINDIterator#next()} returns a flyweight positioned on the
+ * current entry, not a fresh object, so a returned {@link PINDElement} is only valid until the next
+ * call to {@code next()}. Every caller uses it strictly inside the loop body, which is what makes
+ * the zero-allocation iteration possible. Do not retain one.</p>
  */
 public class PINDList {
 
-    private PINDElement first = null;
-    private PINDElement last = null;
-    private int size = 0;
+    private static final int TOMBSTONE = -1;
+    private static final int INITIAL_CAPACITY = 8;
 
-    public PINDList(Collection<Integer> seed, int except) {
-        initialize(seed, except);
-    }
+    private int[] ids = new int[0];
+    private long[] violations = new long[0];
+    private long violationCap;
+
+    /** Slots written so far, tombstones included. */
+    private int used;
+    /** Live entries. */
+    private int size;
+    /** Removed entries still occupying a slot. */
+    private int dead;
 
     public PINDList() {
-
     }
 
-    public int size() {
-        return size;
-    }
-
-    private void initialize(Collection<Integer> seed, int except) {
+    public PINDList(Collection<Integer> seed, int except) {
+        ids = new int[Math.max(INITIAL_CAPACITY, seed.size())];
+        violations = new long[ids.length];
         for (int value : seed) {
             if (value != except) {
-                this.add(value, 0L);
+                add(value);
             }
         }
     }
 
-    public void add(int value, long violationsLeft) {
-        PINDElement element = new PINDElement(value, violationsLeft);
-        if (this.last == null) {
-            this.first = element;
-        } else {
-            this.last.next = element;
-        }
-        this.last = element;
-        size++;
+    public int size() {
+        return size;
     }
 
     /**
@@ -52,7 +62,36 @@ public class PINDList {
      * @return True if there is no item in the list, False otherwise
      */
     public boolean isEmpty() {
-        return this.first == null;
+        return size == 0;
+    }
+
+    /** The violation budget shared by every candidate in this list. */
+    public long violationCap() {
+        return violationCap;
+    }
+
+    public void setViolationCap(long violationCap) {
+        this.violationCap = violationCap;
+    }
+
+    public void add(int value) {
+        if (used == ids.length) {
+            grow();
+        }
+        ids[used] = value;
+        violations[used] = 0L;
+        used++;
+        size++;
+    }
+
+    /**
+     * @param violationsLeft the shared budget for this list; callers pass the same value for every
+     *                       entry, and it is normally overwritten by
+     *                       {@link Candidates#calculateViolations(Attribute[])} before use.
+     */
+    public void add(int value, long violationsLeft) {
+        setViolationCap(violationsLeft);
+        add(value);
     }
 
     /**
@@ -61,22 +100,50 @@ public class PINDList {
      * @return an PINDIterator which yields all PINDElements in the list one after another.
      */
     public PINDIterator elementIterator() {
+        // Removals leave tombstones so they stay O(1) and preserve order, but the streaming
+        // validator re-iterates a dependent's whole list once per value group, so every dead slot
+        // is re-walked thousands of times before it would ever be reclaimed. Compacting at a
+        // quarter dead keeps the walks short while staying amortized O(1) per removal, since a
+        // compaction costs O(used) and only follows used/4 removals.
+        if (dead > 16 && dead * 4 > used) {
+            compact();
+        }
         return new PINDIterator();
     }
 
-    public static class PINDElement {
-
-        public int id;
-        public long violationCap;
-        @Getter
-        private long violations;
-        private PINDElement next = null;
-
-        public PINDElement(int value, long maxViolations) {
-            this.id = value;
-            this.violationCap = maxViolations;
-            violations = 0L;
+    private void compact() {
+        int write = 0;
+        for (int read = 0; read < used; read++) {
+            if (ids[read] != TOMBSTONE) {
+                ids[write] = ids[read];
+                violations[write] = violations[read];
+                write++;
+            }
         }
+        used = write;
+        dead = 0;
+    }
+
+    private void grow() {
+        int capacity = ids.length == 0 ? INITIAL_CAPACITY : ids.length * 2;
+        int[] grownIds = new int[capacity];
+        long[] grownViolations = new long[capacity];
+        System.arraycopy(ids, 0, grownIds, 0, used);
+        System.arraycopy(violations, 0, grownViolations, 0, used);
+        ids = grownIds;
+        violations = grownViolations;
+    }
+
+    /**
+     * A view onto one entry of the enclosing list. Reused across iteration steps — see the class
+     * comment.
+     */
+    public class PINDElement {
+
+        /** The referenced attribute's id. Refreshed by each {@link PINDIterator#next()}. */
+        public int id;
+
+        private int index;
 
         /**
          * Use this method to reduce the open violations by some amount
@@ -85,57 +152,56 @@ public class PINDList {
          * @return the remaining violations
          */
         public long violate(long occurrences) {
-            violations += occurrences;
-            return violationCap - violations;
+            violations[index] += occurrences;
+            return violationCap - violations[index];
+        }
+
+        public long getViolations() {
+            return violations[index];
+        }
+
+        public long violationCap() {
+            return violationCap;
+        }
+
+        /**
+         * Clears the accumulated violations so the candidate can be charged again from scratch.
+         * Used after the progressive-sampling pass, whose violations must not be double counted
+         * when the same candidate is re-validated against the full data.
+         */
+        public void resetViolations() {
+            violations[index] = 0L;
         }
     }
 
     public class PINDIterator {
 
-        private PINDElement previous = null;
-        private PINDElement current = null;
-        private PINDElement next;
-
-        public PINDIterator() {
-            this.next = first;
-        }
+        private final PINDElement element = new PINDElement();
+        private int cursor;
+        private int current = -1;
 
         public boolean hasNext() {
-            return this.next != null;
+            while (cursor < used && ids[cursor] == TOMBSTONE) {
+                cursor++;
+            }
+            return cursor < used;
         }
 
         public PINDElement next() {
-            this.previous = this.current;
-            this.current = this.next;
-            if (this.current != null) {
-                this.next = this.current.next;
+            if (!hasNext()) {
+                throw new NoSuchElementException();
             }
-            assert this.current != null;
-            return this.current;
+            current = cursor;
+            cursor++;
+            element.index = current;
+            element.id = ids[current];
+            return element;
         }
 
         public void remove() {
-            // if there is no previous element, we simply need to point the first pointer of the List to the next entry.
-            if (this.previous == null) {
-                // point first to next element
-                first = this.next;
-                // set current to null, since it is 'deleted'
-                current = null;
-            }
-            // the last element should be removed
-            else if (this.next == null) {
-                last = this.previous;
-                last.next = null;
-            }
-            // if we are at the first or later entry we need to put the next pointer of the previous element to the next element.
-            // This means we exclude the current element.
-            else {
-                // set the previous point to the next element
-                this.previous.next = this.next;
-                // set the current element to the previous, such that the previous will still be the previous after the next call of next()
-                this.current = this.previous;
-            }
+            ids[current] = TOMBSTONE;
             size--;
+            dead++;
         }
     }
 }

@@ -4,7 +4,9 @@ import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
 import com.opencsv.exceptions.CsvValidationException;
 import io.Merger;
+import io.InMemoryValidator;
 import io.Output;
+import io.PartitionedValidator;
 import io.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,10 +71,39 @@ public class Spind {
             return;
         }
 
-        candidates.loadUnary(attributes);
+        ColumnStats columnStats = config.collectColumnStats ? collectColumnStats(attributes.length) : null;
+
+        clock.start("preprune");
+        if (config.usePrePrune && columnStats != null) {
+            metrics.prePruned = candidates.loadUnary(attributes, columnStats);
+        } else {
+            candidates.loadUnary(attributes);
+        }
+        clock.stop("preprune");
+
+        if (config.useProgressiveSampling && columnStats != null) {
+            clock.start("sampling");
+            runSamplePass(attributes, candidates, columnStats);
+            logger.info("Finished progressive sampling. Took: " + clock.stop("sampling") + "ms");
+        }
 
         logger.info("Finished initialization. Took: " + clock.stop("init") + "ms");
 
+        // 2b) Physical strategy choice for unary discovery. The whole-dataset index is fastest but
+        // needs the values resident; partitioning bounds that memory while keeping the index
+        // approach; sort-merge below remains the fallback that always applies.
+        if (InMemoryValidator.isApplicable(config, relationMetadata) && runInMemoryValidation(attributes, candidates)) {
+            cleanupTempFiles();
+            output.storeMetadata(config, clock, metrics);
+            return;
+        }
+
+        if (PartitionedValidator.isApplicable(config)) {
+            runPartitionedValidation(attributes, candidates);
+            cleanupTempFiles();
+            output.storeMetadata(config, clock, metrics);
+            return;
+        }
 
         // 3) while attributes not empty.
         while (attributes.length > 0) {
@@ -137,7 +168,15 @@ public class Spind {
             else metrics.nary += numPINDs;
 
             logger.info("Found " + numPINDs + " pINDs at level " + layer);
+            // Timed separately: on result-heavy datasets (WebTables yields ~20M unary pINDs)
+            // serializing the result costs more than discovering it, which would otherwise
+            // swamp any algorithmic difference between variants.
+            clock.start("output");
             output.storePINDs(relationMetadata, attributes, layer, config);
+            if (config.canonicalFolder != null) {
+                output.storeCanonicalPINDs(relationMetadata, attributes, layer, config, config.canonicalFolder);
+            }
+            clock.stop("output");
 
             // clean relation files
             for (RelationMetadata relation : relationMetadata) {
@@ -233,10 +272,38 @@ public class Spind {
         }
 
         clock.start("chunking");
-        logger.info("Stating chunking");
+
+        // Under direct-source partitioning only the relations big enough to need decomposing into
+        // parallel work units still get chunked; the rest are read from source and skip the
+        // round-trip entirely.
+        List<RelationMetadata> toChunk = new ArrayList<>();
+        if (skipChunking()) {
+            long totalBytes = 0;
+            for (RelationMetadata relation : relationMetadata) {
+                totalBytes += relation.inputSizeBytes();
+            }
+            long threshold = config.chunkThresholdBytes(totalBytes);
+            for (RelationMetadata relation : relationMetadata) {
+                relation.chunked = relation.inputSizeBytes() >= threshold;
+                if (relation.chunked) {
+                    toChunk.add(relation);
+                }
+            }
+            logger.info("Chunking " + toChunk.size() + " of " + relationMetadata.length
+                    + " relations (threshold " + (threshold / (1024 * 1024))
+                    + " MB); the rest are partitioned directly from source");
+        } else {
+            toChunk.addAll(List.of(relationMetadata));
+            logger.info("Stating chunking");
+        }
+
+        if (toChunk.isEmpty()) {
+            clock.stop("chunking");
+            return relationMetadata;
+        }
 
         ExecutorService executors = Executors.newFixedThreadPool(config.PARALLEL);
-        executors.invokeAll(Arrays.stream(relationMetadata).sorted().toList()).forEach(relation -> {
+        executors.invokeAll(toChunk.stream().sorted().toList()).forEach(relation -> {
 
             try {
                 relation.get();
@@ -290,6 +357,195 @@ public class Spind {
         }
 
         return jobs;
+    }
+
+    /**
+     * Runs unary discovery entirely in memory and writes the results.
+     *
+     * @return true if it completed; false if the index hit its ceiling, in which case no state has
+     * been kept and the caller must run the standard pipeline.
+     */
+    private boolean runInMemoryValidation(Attribute[] attributes, Candidates candidates)
+            throws IOException, InterruptedException {
+
+        layer = 1;
+        attachAttributes(attributes);
+
+        int numCandidates = calcPINDs(attributes);
+        metrics.layerAttributes.add(attributes.length);
+        metrics.layerCandidates.add(numCandidates);
+        logger.info("Starting in-memory layer 1 with " + attributes.length + " attributes forming " + numCandidates + " candidates");
+
+        clock.start("inmemory");
+        boolean completed = new InMemoryValidator(config).validate(relationMetadata, attributes, candidates);
+        long elapsed = clock.stop("inmemory");
+
+        if (!completed) {
+            // Metrics recorded above describe an attempt that produced nothing; drop them so the
+            // standard pipeline's own layer-1 entry is not duplicated.
+            metrics.layerAttributes.clear();
+            metrics.layerCandidates.clear();
+            layer = 0;
+            return false;
+        }
+
+        candidates.cleanCandidates();
+        logger.info("Finished in-memory validation. Took: " + elapsed + "ms");
+
+        int numPINDs = calcPINDs(attributes);
+        metrics.layerPINDs.add(numPINDs);
+        metrics.unary = numPINDs;
+        logger.info("Found " + numPINDs + " pINDs at level 1");
+
+        clock.start("output");
+        output.storePINDs(relationMetadata, attributes, 1, config);
+        if (config.canonicalFolder != null) {
+            output.storeCanonicalPINDs(relationMetadata, attributes, 1, config, config.canonicalFolder);
+        }
+        clock.stop("output");
+        return true;
+    }
+
+    /**
+     * Whether chunk files can be skipped entirely.
+     *
+     * Only when the partitioned validator will run and will read sources itself. Column statistics
+     * are gathered during chunking, so requesting both is contradictory — chunking wins, since
+     * dropping the statistics would silently disable pre-pruning instead.
+     */
+    private boolean skipChunking() {
+        if (!config.usePartitionFromSource || !PartitionedValidator.isApplicable(config)) {
+            return false;
+        }
+        if (config.collectColumnStats) {
+            logger.info("Not skipping chunking: column statistics are collected during it");
+            return false;
+        }
+        return true;
+    }
+
+    /** Runs unary discovery over hash partitions and writes the results. */
+    private void runPartitionedValidation(Attribute[] attributes, Candidates candidates)
+            throws IOException, InterruptedException {
+
+        layer = 1;
+        attachAttributes(attributes);
+
+        int numCandidates = calcPINDs(attributes);
+        metrics.layerAttributes.add(attributes.length);
+        metrics.layerCandidates.add(numCandidates);
+        logger.info("Starting partitioned layer 1 with " + attributes.length + " attributes forming " + numCandidates + " candidates");
+
+        clock.start("partitioned");
+        PartitionedValidator validator = new PartitionedValidator(config);
+        validator.validate(relationMetadata, attributes, candidates);
+        long elapsed = clock.stop("partitioned");
+
+        metrics.partitions = validator.partitionsProcessed();
+        metrics.partitionDepth = validator.maxDepth();
+        metrics.largestPartition = validator.largestPartition();
+        metrics.removedByBound = validator.removedByBound();
+        metrics.partitionWriteMillis = validator.writeMillis();
+        metrics.partitionLoadMillis = validator.loadMillis();
+        metrics.partitionAccumulateMillis = validator.accumulateMillis();
+
+        candidates.cleanCandidates();
+        logger.info("Finished partitioned validation. Took: " + elapsed + "ms");
+
+        int numPINDs = calcPINDs(attributes);
+        metrics.layerPINDs.add(numPINDs);
+        metrics.unary = numPINDs;
+        logger.info("Found " + numPINDs + " pINDs at level 1");
+
+        clock.start("output");
+        output.storePINDs(relationMetadata, attributes, 1, config);
+        if (config.canonicalFolder != null) {
+            output.storeCanonicalPINDs(relationMetadata, attributes, 1, config, config.canonicalFolder);
+        }
+        clock.stop("output");
+    }
+
+    /** Gathers the per-relation counters produced during chunking into one attribute-indexed view. */
+    private ColumnStats collectColumnStats(int attributeCount) {
+        ColumnStats stats = new ColumnStats(attributeCount);
+        for (RelationMetadata relation : relationMetadata) {
+            if (relation.columnTotalValues == null) continue;
+            stats.ingest(relation.offset, relation.columnTotalValues, relation.columnNullValues, relation.columnDistinctValues);
+        }
+        return stats;
+    }
+
+    /**
+     * Runs one full sort/merge/validate cycle over a fraction of each relation's chunks, purely to
+     * eliminate candidates cheaply before the expensive full pass.
+     *
+     * Everything the pass accumulates as a side effect — violation counters, reference counts,
+     * per-attribute metadata, the sorted relation files and the Bloom filter — is rolled back
+     * afterwards, so the subsequent full pass behaves exactly as if the sample had never run. The
+     * only thing that survives is the set of candidates it disproved.
+     */
+    private void runSamplePass(Attribute[] attributes, Candidates candidates, ColumnStats columnStats)
+            throws IOException, InterruptedException {
+
+        Map<Integer, List<Path>> fullChunks = new HashMap<>();
+        for (RelationMetadata relation : relationMetadata) {
+            fullChunks.put(relation.id, new ArrayList<>(relation.chunks));
+            int sampleSize = Math.max(1, (int) Math.ceil(relation.chunks.size() * config.samplingFraction));
+            if (sampleSize >= relation.chunks.size()) {
+                continue; // relation fits in a single chunk: sampling it would just do the work twice
+            }
+            List<Path> sample = new ArrayList<>(relation.chunks.subList(0, sampleSize));
+            relation.chunks.clear();
+            relation.chunks.addAll(sample);
+        }
+
+        int candidatesBefore = countCandidates(attributes);
+        try {
+            attachAttributes(attributes);
+            List<SortJob> sortJobs = createSortJobs();
+
+            ExecutorService executors = Executors.newFixedThreadPool(config.PARALLEL);
+            List<SortResult> sortResults = executors.invokeAll(sortJobs.stream().sorted().toList()).stream().map(future -> {
+                try {
+                    return future.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    e.printStackTrace();
+                    return new SortResult(null, null);
+                }
+            }).toList();
+            executors.shutdown();
+
+            int activeRelations = iterativeMerge(attributes, sortResults.stream().map(SortResult::mergeJob).toList());
+
+            Validator validator = new Validator(config, candidates, config.VALIDATION_SIZE / activeRelations);
+            validator.validateSample(columnStats, filter);
+            candidates.cleanCandidates();
+        } finally {
+            // Restore the full chunk lists whatever happened, or the main loop would silently run
+            // on the sample and under-report violations.
+            for (RelationMetadata relation : relationMetadata) {
+                relation.chunks.clear();
+                relation.chunks.addAll(fullChunks.get(relation.id));
+            }
+            for (RelationMetadata relation : relationMetadata) {
+                Files.deleteIfExists(Path.of(config.tempFolder + File.separator + "relation_" + relation.id + ".txt"));
+            }
+            candidates.resetAfterSampling(attributes);
+            if (config.useFilter) {
+                this.filter = BloomFilter.create(Funnels.integerFunnel(), 100_000_000, 0.05);
+            }
+        }
+
+        metrics.samplePruned = candidatesBefore - countCandidates(attributes);
+        logger.info("Progressive sampling removed " + metrics.samplePruned + " of " + candidatesBefore + " candidates");
+    }
+
+    private int countCandidates(Attribute[] attributes) {
+        int total = 0;
+        for (Attribute attribute : attributes) {
+            if (attribute.getReferenced() != null) total += attribute.getReferenced().size();
+        }
+        return total;
     }
 
     private void runSimilarityDiscovery(Attribute[] attributes) throws IOException, CsvValidationException, InterruptedException {

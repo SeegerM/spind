@@ -17,7 +17,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 
 /**
@@ -37,6 +40,17 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
     public String[] columnNames;
     public List<Attribute> connectedAttributes;
 
+    /**
+     * Whether chunk files were written for this relation. When false the relation was left
+     * unchunked and must be read from its source instead.
+     */
+    public boolean chunked = true;
+
+    /** Per-column counters filled by {@link #call()} when {@link Config#collectColumnStats} is on. */
+    public long[] columnTotalValues;
+    public long[] columnNullValues;
+    public long[] columnDistinctValues;
+
     public RelationMetadata(int relationId, int relationOffset, TableSource source, Config config, ConnectionRegistry registry) throws IOException, CsvValidationException {
         this.chunks = new ArrayList<>();
         this.config = config;
@@ -45,6 +59,11 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
         this.size = sizeOf(source);
         this.relationalInput = RelationalInputFactory.open(source, config, registry);
         this.columnNames = relationalInput.getHeader();
+    }
+
+    /** Raw input size in bytes, or 0 for sources that cannot report one cheaply. */
+    public long inputSizeBytes() {
+        return size;
     }
 
     private static long sizeOf(TableSource source) throws IOException {
@@ -70,8 +89,12 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
         chunks.add(chunkPath);
         int chunkSize = 0;
 
+        StatsCollector stats = config.collectColumnStats ? new StatsCollector(columnNames.length, config) : null;
+
         while (relationalInput.hasNext()) {
-            csvWriter.writeNext(relationalInput.next());
+            String[] row = relationalInput.next();
+            if (stats != null) stats.observe(row);
+            csvWriter.writeNext(row);
             if (++chunkSize >= maxSize) {
                 chunkWriter.close();
 
@@ -88,8 +111,84 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
         }
         chunkWriter.close();
         relationalInput.close();
+        if (stats != null) stats.publishTo(this);
         logger.debug("Finished relation" + this.id + " (" + (System.currentTimeMillis() - sTime) + "ms)");
         return null;
+    }
+
+    /**
+     * Accumulates per-column counts for one relation while its rows stream past.
+     *
+     * Distinct tracking is abandoned wholesale for the relation once the shared budget is
+     * exhausted, rather than per column: a partial picture across columns invites the mistake of
+     * reading "few distinct values" off a column whose set was simply dropped early.
+     */
+    private static final class StatsCollector {
+
+        private final Config config;
+        private final long[] total;
+        private final long[] nulls;
+        private final Set<String>[] distinct;
+        private long retained;
+        private boolean overBudget;
+
+        @SuppressWarnings("unchecked")
+        StatsCollector(int columns, Config config) {
+            this.config = config;
+            this.total = new long[columns];
+            this.nulls = new long[columns];
+            this.distinct = new Set[columns];
+            for (int i = 0; i < columns; i++) {
+                this.distinct[i] = new HashSet<>();
+            }
+        }
+
+        void observe(String[] row) {
+            // Once the budget is gone the relation can no longer contribute a distinct count, and
+            // a distinct count is the only thing the pruning bound can use. Counting the remaining
+            // rows would be pure overhead — and on a multi-GB relation that overhead is a
+            // per-cell string comparison over billions of cells, which measurably outweighs the
+            // pruning it can never enable. Bail out entirely instead.
+            if (overBudget) {
+                return;
+            }
+            int columns = Math.min(row.length, total.length);
+            for (int column = 0; column < columns; column++) {
+                String value = row[column];
+                // Mirrors CsvRelationalInput's chunk-reading null rule: the configured null
+                // string becomes an actual null everywhere except EQUALITY mode, where all
+                // nulls are deliberately treated as one ordinary value.
+                boolean isNull = value == null
+                        || (value.equals(config.nullString) && config.nullHandling != Config.NullHandling.EQUALITY);
+                if (isNull) {
+                    nulls[column]++;
+                    continue;
+                }
+                total[column]++;
+                if (distinct[column].add(value) && ++retained > config.statsValueBudget) {
+                    overBudget = true;
+                    Arrays.fill(distinct, null); // release the sets immediately
+                    return; // the counts for this row are already incomplete; abandon them
+                }
+            }
+        }
+
+        /**
+         * Publishes the counters, or nothing but UNKNOWN if collection was abandoned. Abandoning
+         * stops mid-relation, so the totals gathered up to that point describe a prefix of the
+         * data, not the relation — reporting them as if they were complete would silently corrupt
+         * every violation budget derived from them.
+         */
+        void publishTo(RelationMetadata relation) {
+            relation.columnTotalValues = new long[total.length];
+            relation.columnNullValues = new long[total.length];
+            relation.columnDistinctValues = new long[total.length];
+            for (int column = 0; column < total.length; column++) {
+                relation.columnTotalValues[column] = overBudget ? ColumnStats.UNKNOWN : total[column];
+                relation.columnNullValues[column] = overBudget ? ColumnStats.UNKNOWN : nulls[column];
+                relation.columnDistinctValues[column] = overBudget ? ColumnStats.UNKNOWN : distinct[column].size();
+            }
+        }
     }
 
     @Override

@@ -43,6 +43,121 @@ public class Config {
     public boolean refineFilter = true; // whether the bloom filter should be reconstructed in every layer
     public boolean useFilter = true; // whether the bloom filter should be used
 
+    /**
+     * When non-null, every layer additionally writes a sorted, order-independent dump of its
+     * pINDs to this folder. Used by {@link Benchmark} to verify that an optimization leaves the
+     * discovered result set untouched. Has no effect on discovery itself.
+     */
+    public String canonicalFolder = null;
+
+    // --- Optimizations under evaluation (see Benchmark) -----------------------------------
+    // All default to off, so an unconfigured Config reproduces the original algorithm exactly.
+    // Each is expected to change runtime only; the benchmark asserts the discovered pIND set is
+    // bit-identical to the baseline.
+
+    /** Collect per-column counts during chunking. Prerequisite for {@link #usePrePrune} and {@link #useProgressiveSampling}. */
+    public boolean collectColumnStats = false;
+
+    /** Cap on distinct values retained per relation while collecting statistics. */
+    public int statsValueBudget = 200_000;
+
+    /** O1: drop unary candidates whose distinct-count gap already exceeds the violation budget. */
+    public boolean usePrePrune = false;
+
+    /** O2: parse validation value groups into primitive arrays instead of concatenated strings. */
+    public boolean useFastValidation = false;
+
+    /**
+     * O3: run a cheap validation pass over a sample of chunks before the full unary pass.
+     *
+     * <p><b>Unsound in this architecture — kept only to reproduce that result.</b> Pruning from a
+     * sample requires the <i>referenced</i> side to be complete: a dependent value counts as a
+     * violation only if it appears nowhere in the referenced column. SPIND merges every attribute
+     * of a relation into one sorted stream, and each column acts as dependent and referenced side
+     * simultaneously, so sampling chunks necessarily samples both sides. Referenced values that
+     * fall outside the sample then look absent, and valid pINDs are charged violations they do not
+     * have. Measured on the {@code us} dataset: 126 pINDs lost, 0 gained.</p>
+     */
+    public boolean useProgressiveSampling = false;
+
+    /** Fraction of each relation's chunks used by the O3 sample pass. */
+    public double samplingFraction = 0.1;
+
+    /**
+     * O4: replace sort/merge/stream-validate with an in-memory value-to-attribute inverted index
+     * for unary discovery. Only engaged when the input fits the gates below; otherwise, and on
+     * n-ary runs, the standard pipeline runs unchanged.
+     */
+    public boolean useInMemoryValidation = false;
+
+    /** Raw input size above which in-memory validation is not attempted. */
+    public long inMemoryValidationLimitBytes = 512L * 1024 * 1024;
+
+    /**
+     * Distinct-value ceiling for the in-memory index. This, not the byte gate, is what bounds heap
+     * use: the index holds one entry per distinct value, and a Java String costs far more than the
+     * bytes it came from. Exceeding it abandons the attempt and falls back to sort-merge.
+     */
+    public int inMemoryMaxDistinctValues = 40_000_000;
+
+    /**
+     * O5: hash-partition the value stream and run the inverted-index validator per partition,
+     * replacing the global sort and merge. Applies when the whole-dataset index would not fit.
+     * Unary and duplicate-aware only.
+     */
+    public boolean usePartitionedValidation = false;
+
+    /** Records above which a partition is re-split with further hash bits instead of loaded. */
+    public long partitionMaxRecords = 8_000_000L;
+
+    /**
+     * Write partition spills as length-prefixed binary rather than delimited text.
+     *
+     * Partition write and load together are over half of a large partitioned run, and the text
+     * format spends that budget formatting integers, re-parsing them, scanning for delimiters and
+     * allocating a String per line. Off reproduces the text format exactly, so the two can be
+     * compared in one session.
+     */
+    public boolean useBinaryPartitions = true;
+
+    /**
+     * Partition straight from the sources, skipping the chunk round-trip entirely.
+     *
+     * Chunking exists to hand the sorter parallel work units, and under partitioned validation the
+     * sorter never runs — so the chunks are written and read once for nothing. The catch is that
+     * chunking is itself the only place source reading gets decomposed: skipping it leaves
+     * parallelism at one thread per relation, which on TPC-H means one thread carrying
+     * {@code lineitem}. Whether that trade pays is a measurement, not a deduction.
+     */
+    public boolean usePartitionFromSource = false;
+
+    /**
+     * Relation size at or above which chunks are still written even under
+     * {@link #usePartitionFromSource}.
+     *
+     * A relation is a single stream and cannot be read by more than one thread, so a dataset with
+     * one dominant table is bounded by that table no matter how many cores are free — measured at
+     * 0.67x on TPC-H 5, where {@code lineitem} is 72% of the data. Chunking is what decomposes a
+     * relation into parallel units, so the large ones keep it and everything else skips the
+     * round-trip. Set to 0 to chunk everything (every relation clears the bar), or
+     * {@link Long#MAX_VALUE} to chunk nothing.
+     *
+     * <p>The default of -1 derives it instead: a relation is chunked when it exceeds an even share
+     * of the input across the worker threads, which is exactly the condition under which leaving it
+     * whole would make one worker the critical path. A fixed byte figure gets this wrong in both
+     * directions — 512 MB left TPC-H 1's second-largest relation serial at 172 MB, and would chunk
+     * everything in a dataset that happens to be uniformly large.</p>
+     */
+    public long chunkThresholdBytes = -1;
+
+    /** Resolves {@link #chunkThresholdBytes}, deriving the auto value from the total input size. */
+    public long chunkThresholdBytes(long totalInputBytes) {
+        if (chunkThresholdBytes >= 0) {
+            return chunkThresholdBytes;
+        }
+        return Math.max(1L, totalInputBytes / Math.max(1, PARALLEL));
+    }
+
     // --- Similarity-based IND discovery (psIND) ---
     // NONE = classic exact-equality pIND (default). Anything else activates the SAWFISH-style
     // similarity discovery path in core/Spind.execute(). Unary only.

@@ -4,4 +4,8 @@ temp/
 *.jar
 *SPIND*.json
 results/
+# Benchmark measurements are a deliverable, not a build artifact — the bare results/ rule above
+# would otherwise swallow them.
+!benchmark/results/
+cp.txt
 connections.properties

@@ -1,0 +1,17 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!--
+      Per-chunk and per-sort-job DEBUG lines cost real time on datasets with thousands of
+      relations (WebTables emits one per chunk per layer), which would show up as algorithm
+      cost in the benchmark. Keep INFO for the phase summaries, drop everything below.
+    -->
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+    <logger name="core.Spind" level="INFO"/>
+</configuration>
