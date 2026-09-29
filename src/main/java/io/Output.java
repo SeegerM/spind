@@ -23,17 +23,24 @@ public class Output {
         this.resultFolder = resultFolder;
     }
 
-    private static double getPartialDegree(Config config, PINDList.PINDElement next) {
+    static double getPartialDegree(Config config, PINDList.PINDElement next) {
         long violations = next.getViolations();
+        long dependantSize = next.dependantSize();
         long capViolations = next.violationCap();
 
-        // the partial degree can be calculated using the threshold and the leftover violations
-        double partialDegree = 1.0;
-        if (capViolations > 0) {
-            partialDegree = (double) violations / capViolations;
-            partialDegree = 1.0 - partialDegree + config.threshold * partialDegree;
+        // Coverage is 1 - violations / |dependent|.  The old reconstruction inverted
+        // cap=floor((1-rho)|dependent|), which loses the remainder: with 69 observations at
+        // rho=.5, 34 violations were printed as .5 instead of the exact 35/69.
+        if (dependantSize > 0) {
+            return 1.0 - (double) violations / dependantSize;
         }
-        return partialDegree;
+        // Compatibility fallback for a caller that has not populated the size. It preserves the
+        // old behaviour but should be unreachable in every validation strategy.
+        if (capViolations > 0) {
+            double spent = (double) violations / capViolations;
+            return 1.0 - spent + config.threshold * spent;
+        }
+        return 1.0;
     }
 
     /**

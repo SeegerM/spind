@@ -14,6 +14,8 @@ public final class SimilarityMeasureFactory {
             case EDIT_DISTANCE -> new LevenshteinSimilarity(config.editDistanceThreshold);
             case JACCARD -> new JaccardSimilarity(config.normalizedThreshold);
             case HYBRID -> new HybridLevenshtein(config.normalizedThreshold);
+            case REGISTRY_PREFIX -> new RegistryPrefixSimilarity();
+            case SEPARATOR_NORMALISED -> new SeparatorNormalisedSimilarity();
         };
     }
 }

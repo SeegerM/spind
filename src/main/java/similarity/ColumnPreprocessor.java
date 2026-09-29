@@ -3,6 +3,7 @@ package similarity;
 import com.opencsv.CSVParserBuilder;
 import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
+import com.opencsv.ICSVParser;
 import com.opencsv.exceptions.CsvValidationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -101,7 +102,14 @@ public final class ColumnPreprocessor {
                 .withCSVParser(new CSVParserBuilder()
                         .withSeparator(config.separator)
                         .withQuoteChar(config.quoteChar)
-                        .withEscapeChar(config.fileEscape)
+                        // RelationMetadata writes chunks as RFC 4180: a backslash is data and an
+                        // embedded quote is doubled. Leaving OpenCSV's default backslash escape in
+                        // place makes a value ending in one swallow its closing delimiter, which
+                        // is the same defect that silently truncated a relation on the exact path.
+                        // Fixing that reader and not this one left the similarity path broken in
+                        // the same way -- it fails loudly here only because a malformed line
+                        // reaches the end of a chunk rather than the end of the file.
+                        .withEscapeChar(ICSVParser.NULL_CHARACTER)
                         .build())
                 .build();
     }

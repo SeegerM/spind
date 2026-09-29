@@ -31,6 +31,8 @@ public class PINDList {
     private int[] ids = new int[0];
     private long[] violations = new long[0];
     private long violationCap;
+    /** Cardinality of the dependent observation used to turn violations into exact coverage. */
+    private long dependantSize = -1L;
 
     /** Slots written so far, tombstones included. */
     private int used;
@@ -72,6 +74,12 @@ public class PINDList {
 
     public void setViolationCap(long violationCap) {
         this.violationCap = violationCap;
+    }
+
+    /** Sets both values derived from the dependent; keeping the size avoids inverting a floored cap. */
+    public void setViolationBudget(long violationCap, long dependantSize) {
+        this.violationCap = violationCap;
+        this.dependantSize = dependantSize;
     }
 
     public void add(int value) {
@@ -162,6 +170,10 @@ public class PINDList {
 
         public long violationCap() {
             return violationCap;
+        }
+
+        public long dependantSize() {
+            return dependantSize;
         }
 
         /**

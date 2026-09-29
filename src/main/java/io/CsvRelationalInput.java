@@ -4,6 +4,7 @@ import com.google.common.hash.BloomFilter;
 import com.opencsv.CSVParserBuilder;
 import com.opencsv.CSVReader;
 import com.opencsv.CSVReaderBuilder;
+import com.opencsv.ICSVParser;
 import com.opencsv.exceptions.CsvValidationException;
 import runner.Config;
 import structures.Attribute;
@@ -81,7 +82,16 @@ public class CsvRelationalInput implements RelationalInput {
 
         BufferedReader reader = Files.newBufferedReader(sortJob.chunkPath());
 
-        this.CSVReader = new CSVReaderBuilder(reader).withCSVParser(new CSVParserBuilder().withQuoteChar(config.quoteChar).withSeparator(config.separator).build()).build();
+        this.CSVReader = new CSVReaderBuilder(reader).withCSVParser(new CSVParserBuilder()
+                .withQuoteChar(config.quoteChar)
+                // RelationMetadata writes intermediate chunks as RFC 4180 CSV.  In that format a
+                // literal backslash stays data and embedded quotes are doubled, so OpenCSV's
+                // parser escape must be disabled (its default is backslash).
+                .withEscapeChar(ICSVParser.NULL_CHARACTER)
+                .withIgnoreLeadingWhiteSpace(config.ignoreLeadingWhiteSpace)
+                .withStrictQuotes(config.strictQuotes)
+                .withSeparator(config.separator)
+                .build()).build();
 
         // read the first line
         this.nextLine = readNextLine();
@@ -217,7 +227,10 @@ public class CsvRelationalInput implements RelationalInput {
         try {
             lineArray = this.CSVReader.readNext();
         } catch (CsvValidationException | IOException e) {
-            e.printStackTrace();
+            // A parse error is not end-of-input.  Treating it as EOF silently validates a prefix
+            // of the relation and can turn invalid dependencies into valid ones (or hide valid
+            // partial dependencies).  Fail the run with the parser's location and cause intact.
+            throw new IllegalStateException("Could not parse CSV input", e);
         }
         if (lineArray == null) {
             return null;

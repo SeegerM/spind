@@ -28,7 +28,18 @@ public class Config {
     public String fileEnding = ".csv";
     public char separator = ',';
     public char quoteChar = '\"';
-    public char fileEscape = '\\';
+    /**
+     * Parser escape for reading input CSV. Disabled by default, which makes the dialect RFC 4180:
+     * a backslash is data and an embedded quote is doubled.
+     *
+     * <p>It defaulted to backslash, and every entry point that read RFC 4180 input had to remember
+     * to clear it. {@code SpindMetaLevel} did; {@code SpindSimilarity} did not, so a similarity run
+     * over the same export died on the first value ending in a backslash while the exact run over
+     * it succeeded. That is the second time this dialect mismatch has cost a run, so the default
+     * moves to the dialect every producer in this system actually writes rather than staying a
+     * thing each caller must know. A source genuinely using backslash escapes can set it back.</p>
+     */
+    public char fileEscape = '\0';
     public boolean strictQuotes = false;
     public boolean ignoreLeadingWhiteSpace = true;
     public boolean inputFileHasHeader = true;
@@ -189,7 +200,17 @@ public class Config {
         /** Jaccard similarity on tokens with threshold {@link #normalizedThreshold}. */
         JACCARD,
         /** Hybrid: absolute ED for short values, normalized ED for longer ones (paper §3). */
-        HYBRID
+        HYBRID,
+        /**
+         * Equality after stripping a leading registry prefix from both values.
+         *
+         * For identifiers two publishers spell differently only in whether the issuing
+         * registry's tag is part of them -- {@code 0114709} against {@code tt0114709}. Narrow on
+         * purpose: an edit budget wide enough to bridge the tag also makes consecutive numeric
+         * identifiers similar, which erases real reference gaps rather than repairing a spelling.
+         */
+        REGISTRY_PREFIX,
+        SEPARATOR_NORMALISED
     }
 
     public enum Tokenizer {

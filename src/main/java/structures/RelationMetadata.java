@@ -88,7 +88,14 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
         int chunkNum = 0;
         Path chunkPath = Path.of(config.tempFolder + File.separator + "r_" + id + "_c_" + chunkNum + ".txt");
         BufferedWriter chunkWriter = Files.newBufferedWriter(chunkPath, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE);
-        ICSVWriter csvWriter = new CSVWriterBuilder(chunkWriter).withSeparator(config.separator).withQuoteChar(config.quoteChar).withEscapeChar(config.fileEscape).build();
+        ICSVWriter csvWriter = new CSVWriterBuilder(chunkWriter)
+                .withSeparator(config.separator)
+                .withQuoteChar(config.quoteChar)
+                // CSVWriter's quote escape emits RFC 4180 doubled quotes.  Do not reuse the raw
+                // source's parser escape: input dialect and intermediate representation are
+                // independent, and a backslash immediately before a closing quote is valid data.
+                .withEscapeChar(ICSVWriter.DEFAULT_ESCAPE_CHARACTER)
+                .build();
         chunks.add(chunkPath);
         int chunkSize = 0;
 
@@ -107,7 +114,11 @@ public class RelationMetadata implements Callable<Void>, Comparable<RelationMeta
                     chunkSize = 0;
                     chunkPath = Path.of(config.tempFolder + File.separator + "r_" + id + "_c_" + chunkNum + ".txt");
                     chunkWriter = Files.newBufferedWriter(chunkPath, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE);
-                    csvWriter = new CSVWriterBuilder(chunkWriter).withSeparator(config.separator).withQuoteChar(config.quoteChar).withEscapeChar(config.fileEscape).build();
+                    csvWriter = new CSVWriterBuilder(chunkWriter)
+                            .withSeparator(config.separator)
+                            .withQuoteChar(config.quoteChar)
+                            .withEscapeChar(ICSVWriter.DEFAULT_ESCAPE_CHARACTER)
+                            .build();
                     chunks.add(chunkPath);
                 }
             }

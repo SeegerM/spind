@@ -533,7 +533,7 @@ public class Candidates {
 
             // One budget for the whole list: it depends only on the dependent attribute.
             PINDList referencedList = current[dependantId].getReferenced();
-            referencedList.setViolationCap(maxViolations);
+            referencedList.setViolationBudget(maxViolations, depSize);
 
             PINDList.PINDIterator referenced = referencedList.elementIterator();
             while (referenced.hasNext()) {
@@ -580,7 +580,7 @@ public class Candidates {
 
             // One budget for the whole list: it depends only on the dependent attribute.
             PINDList referencedList = current[dependantId].getReferenced();
-            referencedList.setViolationCap(maxViolations);
+            referencedList.setViolationBudget(maxViolations, depSize);
 
             PINDList.PINDIterator referenced = referencedList.elementIterator();
             while (referenced.hasNext()) {

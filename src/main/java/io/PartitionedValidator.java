@@ -113,7 +113,7 @@ public final class PartitionedValidator {
             if (referenced == null) continue;
             long total = attributes[id].getMetadata().totalValues;
             long cap = (long) ((1.0 - config.threshold) * total);
-            referenced.setViolationCap(cap);
+            referenced.setViolationBudget(cap, total);
             // violations = total - coverage <= cap  <=>  coverage >= total - cap
             requiredCoverage[id] = total - cap;
         }
