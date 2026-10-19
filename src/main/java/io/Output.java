@@ -70,7 +70,7 @@ public class Output {
             outputWriter.write("{ \"relation\":" + "\"" + config.tableNames[input.id] + "\",");
 
             // we first save information regarding the attributes in the dataset
-            outputWriter.write("\"attributes\":" + Arrays.toString(input.columnNames).replace(", ", "\",\"").replace("[", "[\""). replace("]", "\"]") + ",");
+            outputWriter.write("\"attributes\":" + Arrays.toString(input.columnNames).replace(", ", "\",\"").replace("[", "[\""). replace("]", "\"]"));
 
             // afterward, we save the pINDs which are dependent on the current relation
             boolean notFirstAttribute = false;
@@ -82,7 +82,7 @@ public class Output {
                 if (notFirstAttribute) {
                     outputWriter.write(",");
                 } else {
-                    outputWriter.write("\"pINDs\":[");
+                    outputWriter.write(",\"pINDs\":[");
                 }
                 notFirstAttribute = true;
 

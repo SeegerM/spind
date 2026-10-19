@@ -36,6 +36,7 @@ public class Spind {
     RelationMetadata[] relationMetadata;
     int layer;
     private BloomFilter<Integer> filter;
+    private CandidateRestriction restriction;   // set by -Dspind.candidates=<file>, otherwise null
 
     public Spind(Config config) {
         this.clock = new Clock();
@@ -85,6 +86,17 @@ public class Spind {
             clock.start("sampling");
             runSamplePass(attributes, candidates, columnStats);
             logger.info("Finished progressive sampling. Took: " + clock.stop("sampling") + "ms");
+        }
+
+        String candidateFile = System.getProperty("spind.candidates");
+        if (candidateFile != null) {
+            String[][] columns = new String[relationMetadata.length][];
+            for (RelationMetadata relation : relationMetadata) {
+                columns[relation.id] = relation.columnNames;
+            }
+            restriction = CandidateRestriction.load(candidateFile, config.tableNames, columns);
+            long kept = restriction.restrict(attributes);
+            logger.info("Candidate restriction (" + candidateFile + "): " + kept + " unary candidates kept");
         }
 
         logger.info("Finished initialization. Took: " + clock.stop("init") + "ms");
@@ -189,6 +201,9 @@ public class Spind {
             // 3.4) Generate new attributes for next layer.
             clock.start("generateNext");
             attributes = candidates.generateNextLayer(attributes, relationMetadata, layer);
+            if (restriction != null) {
+                restriction.restrict(attributes);
+            }
             logger.info("Finished generating next layer. Took: " + clock.stop("generateNext") + "ms");
         }
         // clean up temp
@@ -336,7 +351,11 @@ public class Spind {
         for (RelationMetadata relation : relationMetadata) {
             relation.connectedAttributes = new ArrayList<>();
         }
+        boolean[] keep = restriction == null ? null : restriction.involved(attributes);
         for (Attribute attribute : attributes) {
+            if (attribute == null || (keep != null && !keep[attribute.getId()])) {
+                continue;   // attributes in no remaining candidate are neither read nor sorted
+            }
             relationMetadata[attribute.getRelationId()].connectedAttributes.add(attribute);
         }
         for (RelationMetadata relation : relationMetadata) {
